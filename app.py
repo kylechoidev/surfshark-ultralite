@@ -37,7 +37,7 @@ _cached_state = {
     "gui_frozen": False,
     "locations_count": 0,
     "last_check": 0,
-    "version": "1.2.0"
+    "version": "1.2.1"
 }
 _state_lock = threading.Lock()
 _last_full_probe = 0
@@ -63,7 +63,7 @@ def is_wg_routed():
     except Exception:
         return False
 
-def get_surfshark_session_location():
+def get_surfshark_session_metadata():
     """Reads official Surfshark app's last active session metadata from globals.json."""
     try:
         p = os.path.join(HOME, ".config/Surfshark/globals.json")
@@ -75,10 +75,104 @@ def get_surfshark_session_location():
                     loc = payload.get("vpn_exit_location_name")
                     cc = payload.get("vpn_exit_country_code")
                     if loc and cc:
-                        return f"{loc}, {cc}"
+                        return {
+                            "city": loc,
+                            "country_code": cc.upper(),
+                            "display": f"{loc}, {cc}"
+                        }
     except Exception:
         pass
     return None
+
+def get_surfshark_session_location():
+    """Reads official Surfshark app's last active session metadata from globals.json."""
+    meta = get_surfshark_session_metadata()
+    return meta["display"] if meta else None
+
+_COMMON_COUNTRY_ALIASES = {
+    "US": ["united states", "usa", "u.s.", "u.s.a.", "united states of america"],
+    "GB": ["united kingdom", "uk", "great britain", "england", "scotland", "wales"],
+    "UK": ["united kingdom", "uk", "great britain"],
+    "CA": ["canada"],
+    "AU": ["australia"],
+    "DE": ["germany", "deutschland"],
+    "FR": ["france"],
+    "JP": ["japan"],
+    "SG": ["singapore"],
+    "NL": ["netherlands", "holland"],
+    "TH": ["thailand"],
+    "VN": ["vietnam"],
+    "KR": ["south korea", "korea"],
+    "BR": ["brazil", "brasil"],
+    "ES": ["spain", "espana"],
+    "IT": ["italy", "italia"],
+    "CH": ["switzerland", "swiss"],
+    "SE": ["sweden"],
+    "NO": ["norway"],
+    "DK": ["denmark"],
+    "FI": ["finland"],
+    "IE": ["ireland"],
+    "NZ": ["new zealand"],
+    "IN": ["india"],
+    "MX": ["mexico"],
+    "ZA": ["south africa"],
+    "HK": ["hong kong"],
+    "TW": ["taiwan"],
+}
+
+def get_country_aliases(country_code):
+    """Returns lowercased set of country names and aliases for a given 2-letter ISO country code."""
+    cc = (country_code or "").strip().upper()
+    if not cc:
+        return set()
+    aliases = {cc.lower()}
+    for cluster in locations():
+        if cluster.get("countryCode", "").upper() == cc:
+            cname = cluster.get("country")
+            if cname:
+                aliases.add(cname.lower())
+    for alias in _COMMON_COUNTRY_ALIASES.get(cc, []):
+        aliases.add(alias.lower())
+    return aliases
+
+def is_location_match(session_meta, probed_meta, probed_geo):
+    """
+    Checks if probed egress geo matches the active Surfshark session.
+    Prevents false-positive discrepancies between ISO country codes ('US')
+    and full country names ('United States').
+    """
+    if not session_meta:
+        return True
+
+    session_cc = session_meta.get("country_code", "").upper()
+    session_city = session_meta.get("city", "").strip().lower()
+
+    probed_cc = (probed_meta.get("country_code") or "").strip().upper()
+    probed_country = (probed_meta.get("country") or "").strip().lower()
+    probed_city = (probed_meta.get("city") or "").strip().lower()
+    probed_geo_lower = (probed_geo or "").lower()
+
+    # 1. Country code exact match (e.g. US == US)
+    if session_cc and probed_cc and session_cc == probed_cc:
+        return True
+
+    # 2. Known country names / aliases match probed country or are contained in probed_geo
+    known_aliases = get_country_aliases(session_cc)
+    if probed_country and probed_country in known_aliases:
+        return True
+    if any(alias in probed_geo_lower for alias in known_aliases):
+        return True
+
+    # 3. City exact or substring match (e.g. "Charlotte" == "Charlotte")
+    if session_city and (session_city == probed_city or session_city in probed_geo_lower):
+        return True
+
+    # 4. Token boundary match for 2-letter country code in probed_geo
+    tokens = [t.lower() for t in re.findall(r'[a-zA-Z]+', probed_geo_lower)]
+    if session_cc.lower() in tokens:
+        return True
+
+    return False
 
 def probe_egress():
     """
@@ -98,10 +192,12 @@ def probe_egress():
                 ip = data.get("query")
                 city = data.get("city", "")
                 country = data.get("country", "")
+                country_code = data.get("countryCode", "")
                 geo = f"{city}, {country}".strip(", ")
                 org = data.get("org") or data.get("isp") or data.get("as", "")
+                meta = {"city": city, "country": country, "country_code": country_code}
                 if ip:
-                    return ip, geo, org, "ip-api.com", False, warnings
+                    return ip, geo, org, "ip-api.com", False, warnings, meta
             else:
                 warnings.append(f"Primary probe (ip-api.com) returned status error: {data.get('message', 'unknown')}")
     except Exception as e:
@@ -117,9 +213,10 @@ def probe_egress():
             city = data.get("city", "")
             country = data.get("country", "")
             geo = f"{city}, {country}".strip(", ")
+            meta = {"city": city, "country": country, "country_code": country}
             if ip:
                 warnings.append("Using fallback GeoIP provider: ipinfo.io")
-                return ip, geo, org, "ipinfo.io (fallback)", True, warnings
+                return ip, geo, org, "ipinfo.io (fallback)", True, warnings, meta
     except Exception as e:
         warnings.append(f"Secondary probe (ipinfo.io) failed: {e}")
 
@@ -136,12 +233,13 @@ def probe_egress():
                 ip = r.read().decode().strip()[:64]
                 if ip and re.match(r"^\d{1,3}(\.\d{1,3}){3}$", ip):
                     warnings.append(f"All GeoIP APIs failed; IP resolved via emergency fallback {name}")
-                    return ip, "", "", f"{name} (fallback IP only)", True, warnings
+                    return ip, "", "", f"{name} (fallback IP only)", True, warnings, {}
         except Exception as e:
             warnings.append(f"Fallback {name} failed: {e}")
 
     warnings.append("All egress probes failed (tunnel blackholed or connection offline)")
-    return None, "", "", "None (all probes failed)", True, warnings
+    return None, "", "", "None (all probes failed)", True, warnings, {}
+
 
 def get_electron_processes():
     """Finds Surfshark Electron processes; distinguishes zygote renderers from the main process."""
@@ -191,7 +289,7 @@ def probe_network(force_egress=False):
     warnings = list(_cached_state["probe_warnings"])
     
     if needs_egress:
-        probed_ip, probed_geo, probed_org, probe_src, fb_active, probe_warns = probe_egress()
+        probed_ip, probed_geo, probed_org, probe_src, fb_active, probe_warns, probed_meta = probe_egress()
         _last_full_probe = now
         warnings = probe_warns
         fallback_active = fb_active
@@ -199,19 +297,18 @@ def probe_network(force_egress=False):
         
         if probed_ip:
             ip = probed_ip
-            ss_loc = get_surfshark_session_location() if wg_routed else None
+            session_meta = get_surfshark_session_metadata() if wg_routed else None
+            ss_loc = session_meta["display"] if session_meta else None
             
             if probed_geo:
                 geo = probed_geo
                 # Detect and warn if GeoIP returned a conflicting country against session
-                if ss_loc:
-                    session_cc = ss_loc.split(",")[-1].strip().lower()
-                    if session_cc not in probed_geo.lower():
-                        fallback_active = True
-                        mismatch_warn = f"Location discrepancy: probe returned '{probed_geo}' ({probe_src}) but Surfshark session is '{ss_loc}'"
-                        if mismatch_warn not in warnings:
-                            warnings.append(mismatch_warn)
-                        geo = f"{probed_geo} [Session: {ss_loc}]"
+                if session_meta and not is_location_match(session_meta, probed_meta, probed_geo):
+                    fallback_active = True
+                    mismatch_warn = f"Location discrepancy: probe returned '{probed_geo}' ({probe_src}) but Surfshark session is '{ss_loc}'"
+                    if mismatch_warn not in warnings:
+                        warnings.append(mismatch_warn)
+                    geo = f"{probed_geo} [Session: {ss_loc}]"
             elif ss_loc:
                 geo = ss_loc
             elif ip != _cached_state.get("public_ip"):

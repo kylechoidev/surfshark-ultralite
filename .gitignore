@@ -7,3 +7,4 @@ surfshark-handoff.md
 *.log
 __pycache__/
 *.pyc
+.backups/
