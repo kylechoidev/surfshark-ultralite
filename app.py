@@ -37,7 +37,7 @@ _cached_state = {
     "gui_frozen": False,
     "locations_count": 0,
     "last_check": 0,
-    "version": "1.2.1"
+    "version": "1.2.2"
 }
 _state_lock = threading.Lock()
 _last_full_probe = 0
@@ -399,6 +399,19 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/" or self.path.startswith("/?"):
             page = open(os.path.join(BASE, "index.html")).read()
             self._send(200, page, "text/html")
+        elif self.path in ("/favicon.ico", "/icon.png"):
+            icon_path = os.path.join(BASE, "icon.png")
+            if os.path.exists(icon_path):
+                with open(icon_path, "rb") as f:
+                    data = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "public, max-age=86400")
+                self.end_headers()
+                self.wfile.write(data)
+            else:
+                self._send(404, {"error": "icon not found"})
         elif self.path == "/api/state":
             with _state_lock:
                 self._send(200, dict(_cached_state))
