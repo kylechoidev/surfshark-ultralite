@@ -24,9 +24,9 @@ while the tunnel, NetworkManager profile, and local IPC stay alive.
 
 - `app.py` + `index.html` — ultra-lite web panel on `127.0.0.1:8777`:
   kernel routing ground truth (`dev surfshark_wg`) + resilient multi-endpoint probe
-  fallback (`ipinfo.io` / `ipify` / `ip.sb` / `icanhazip`), freeze/unfreeze endpoints,
-  CleanWeb toggle, open-GUI action
-- `launch.sh` — starts the panel (if not running) and opens it
+  fallback (`ipinfo.io` / `ipify` / `ip.sb` / `icanhazip`), eco-mode freeze/unfreeze endpoints,
+  and reliable official GUI restore/focus (`wmctrl`)
+- `launch.sh` — standalone dedicated application window launcher (LINE Lite-style)
 - `freeze_audit.py` — supervised freeze test: probes every 10s (exit IP,
   tunnel-routed agent sockets, send-queue stall heuristics, NetworkManager
   journal events, API reachability) and **auto-rolls back (SIGCONT) on any
@@ -61,6 +61,36 @@ Linux + NetworkManager, Surfshark 3.12.x, Python 3 (stdlib only).
 python3 app.py            # panel at http://127.0.0.1:8777
 python3 freeze_audit.py 300   # 5-minute supervised freeze window
                            # exit code 0 = PASS, 3 = rolled back / FAIL
+./launch.sh               # opens panel in standalone app window
+```
+
+### Running as a systemd user daemon (recommended)
+
+To run the panel automatically on login as a background service:
+
+```ini
+# ~/.config/systemd/user/surfshark-webui.service
+[Unit]
+Description=SurfShark Ultra-Lite Web UI Control Center Daemon
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/surfshark-webui
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=%h/.Xauthority
+ExecStart=/usr/bin/python3 %h/surfshark-webui/app.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+```
+
+Enable and start with:
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now surfshark-webui.service
 ```
 
 ## Disclaimer
