@@ -206,7 +206,11 @@ async function fetchState() {
 E('btnOpenApp').onclick = async () => {
   log('Opening Surfshark official app window…');
   try {
-    await fetch('/api/open-gui', { method: 'POST' });
+    const r = await fetch('/api/open-gui', { method: 'POST' });
+    const d = await r.json();
+    if (d && d.message && d.message !== 'Opening Surfshark app window…') {
+      log(d.message, !d.ok);
+    }
     fetchState();
   } catch (e) {
     log('Failed opening app: ' + e, true);

@@ -11,6 +11,7 @@ Features:
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import threading
@@ -37,7 +38,7 @@ _cached_state = {
     "gui_frozen": False,
     "locations_count": 0,
     "last_check": 0,
-    "version": "1.2.2"
+    "version": "1.2.3"
 }
 _state_lock = threading.Lock()
 _last_full_probe = 0
@@ -382,6 +383,75 @@ def unfreeze_gui():
     probe_network(force_egress=False)
     return count > 0, f"Resumed {count} UI renderer processes"
 
+def get_gui_env():
+    """Builds environment dict with DISPLAY, XAUTHORITY, DBUS, etc. for launching GUI tools from daemon."""
+    env = os.environ.copy()
+    try:
+        res = subprocess.run(["systemctl", "--user", "show-environment"], capture_output=True, text=True, timeout=2)
+        for line in res.stdout.splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                if k in ("DISPLAY", "XAUTHORITY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "XDG_CURRENT_DESKTOP", "DESKTOP_SESSION"):
+                    if k not in env or not env[k]:
+                        env[k] = v
+    except Exception:
+        pass
+
+    if not env.get("DISPLAY"):
+        if os.path.exists("/tmp/.X11-unix/X0"):
+            env["DISPLAY"] = ":0"
+    if not env.get("XAUTHORITY"):
+        xauth = os.path.expanduser("~/.Xauthority")
+        if os.path.exists(xauth):
+            env["XAUTHORITY"] = xauth
+    if not env.get("XDG_RUNTIME_DIR"):
+        uid = os.getuid()
+        rdir = f"/run/user/{uid}"
+        if os.path.exists(rdir):
+            env["XDG_RUNTIME_DIR"] = rdir
+    return env
+
+def open_official_gui():
+    """Restores, focuses, or launches the official Surfshark GUI app window."""
+    unfreeze_gui()
+    env = get_gui_env()
+
+    # 1. If window already exists in X11, focus and unminimize it via wmctrl
+    if shutil.which("wmctrl"):
+        try:
+            res = subprocess.run(["wmctrl", "-x", "-l"], env=env, capture_output=True, text=True, timeout=2)
+            for line in res.stdout.splitlines():
+                if "surfshark.Surfshark" in line or line.rstrip().endswith(" Surfshark"):
+                    subprocess.run(["wmctrl", "-x", "-a", "surfshark.Surfshark"], env=env, timeout=2)
+                    return True, "Surfshark window focused"
+        except Exception:
+            pass
+
+    # 2. Launch or trigger single-instance restore
+    cmd = ["/opt/Surfshark/surfshark"] if os.path.exists("/opt/Surfshark/surfshark") else ["gtk-launch", "surfshark"]
+    try:
+        subprocess.Popen(
+            cmd,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True
+        )
+
+        if shutil.which("wmctrl"):
+            def _delayed_focus():
+                time.sleep(1.0)
+                try:
+                    subprocess.run(["wmctrl", "-x", "-a", "surfshark.Surfshark"], env=env, timeout=2)
+                except Exception:
+                    pass
+            threading.Thread(target=_delayed_focus, daemon=True).start()
+
+        return True, "Opening Surfshark app window…"
+    except Exception as e:
+        return False, f"Failed to open Surfshark window: {e}"
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
@@ -434,9 +504,8 @@ class Handler(BaseHTTPRequestHandler):
             ok, msg = unfreeze_gui()
             self._send(200, {"ok": ok, "message": msg})
         elif self.path == "/api/open-gui":
-            unfreeze_gui()
-            subprocess.Popen(["gtk-launch", "surfshark"])
-            self._send(200, {"ok": True, "message": "Opening Surfshark app window…"})
+            ok, msg = open_official_gui()
+            self._send(200, {"ok": ok, "message": msg})
         elif self.path == "/api/refresh":
             probe_network(force_egress=True)
             with _state_lock:
